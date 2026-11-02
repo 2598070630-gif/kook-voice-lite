@@ -1,0 +1,21 @@
+{
+  "name": "kook-voice-lite",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "extract:playwright": "node src-tauri/resources/playwright-extract-voice.mjs"
+  },
+  "dependencies": {
+    "@kookapp/voice-web-sdk": "0.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "playwright-core": "^1.64.1",
+    "vite": "^7.1.7"
+  }
+}

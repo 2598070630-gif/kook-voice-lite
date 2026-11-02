@@ -1,0 +1,41 @@
+# Dependencies and generated build files
+node_modules/
+dist/
+build-kit/
+build-deps/
+scripts/prepare-build-deps.ps1
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/node.exe
+src-tauri/resources/licenses/
+
+# Release artifacts and local verification
+portable/
+releases/
+verification/
+backups/
+*.bak
+*.backup
+*.old
+*.orig
+*.tmp
+*.temp
+*.next
+*.log
+*.zip
+*.7z
+*.rar
+*.exe
+*.dll
+*.pdb
+
+# Local credentials, browser sessions and runtime state
+captures/
+playwright-profile/
+window-state.json
+kook-voice-*.json
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

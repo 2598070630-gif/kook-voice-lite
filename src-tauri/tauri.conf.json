@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KOOK Voice Lite",
+  "version": "0.1.0",
+  "identifier": "com.kook.voice-lite",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "KOOK Voice Lite",
+        "width": 900,
+        "height": 620,
+        "minWidth": 700,
+        "minHeight": 520,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; connect-src 'self' https: wss: http://127.0.0.1:5173 ws://127.0.0.1:5173; media-src 'self' blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "resources": [
+      "resources/node.exe",
+      "resources/playwright-extract-voice.mjs",
+      "resources/run-playwright-extractor.cmd",
+      "resources/node_modules/playwright-core/**/*"
+    ],
+    "icon": ["icons/icon.ico"]
+  }
+}
