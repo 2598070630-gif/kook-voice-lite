@@ -17,6 +17,9 @@ foreach ($name in $files) {
 foreach ($name in @('node.exe', 'playwright-extract-voice.mjs', 'run-playwright-extractor.cmd')) {
   if (-not (Test-Path (Join-Path $portableDir "resources\$name"))) { throw "Missing Playwright resource: $name" }
 }
+foreach ($name in @('native\host.mjs', 'node_modules\@roamhq\wrtc-win32-x64\wrtc.node', 'node_modules\audify\build\Release\audify.node')) {
+  if (-not (Test-Path (Join-Path $portableDir "resources\$name"))) { throw "Missing native voice resource: $name" }
+}
 
 # Build in a fresh directory, validate, then replace the published files.
 $stage = Join-Path $releaseDir ('.package-' + [guid]::NewGuid().ToString('N'))

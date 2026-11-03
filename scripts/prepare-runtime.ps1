@@ -6,11 +6,15 @@ $node = (Get-Command node.exe -ErrorAction Stop).Source
 if (-not (Test-Path -LiteralPath "$playwright\package.json")) {
   throw 'Run npm ci in the project root first.'
 }
-if ((& $node -p 'process.platform + "/" + process.arch') -ne 'win32/x64') {
+# Avoid a PowerShell/Node quoting edge case where the slash literal is stripped
+# when this script is launched through another PowerShell process.
+if ((& $node -p 'process.platform + [String.fromCharCode(47)] + process.arch') -ne 'win32/x64') {
   throw 'Use Windows x64 Node.js to prepare Windows x64 release resources.'
 }
 
 New-Item -ItemType Directory -Force -Path "$resources\node_modules", "$resources\licenses" | Out-Null
+& $node (Join-Path $projectRoot 'scripts\prepare-native-runtime.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare native voice runtime.' }
 Copy-Item -LiteralPath $node -Destination "$resources\node.exe" -Force
 Copy-Item -LiteralPath $playwright -Destination "$resources\node_modules" -Recurse -Force
 $version = & $node --version
@@ -30,4 +34,5 @@ try {
     }
   }
 } finally { Pop-Location }
-Write-Output "Prepared Node $version and locked playwright-core in src-tauri/resources."
+Copy-Item -LiteralPath (Join-Path $projectRoot 'native\licenses') -Destination "$resources\licenses\native" -Recurse -Force
+Write-Output "Prepared Node $version, native voice and locked playwright-core in src-tauri/resources."

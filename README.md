@@ -10,15 +10,15 @@ GitHub 自动生成的 **Source code** 压缩包是源码，不是可直接运�
 
 - 保持 `kook_voice_lite.exe`、`WebView2Loader.dll`、`README.txt` 和 `resources/` 目录在一起。
 - 运行不需要自行安装 Rust、MinGW、Node.js 或开发服务器；便携包已带 Node 和 Playwright Core，使用本机 Microsoft Edge。
-- 需要已安装 WebView2 Evergreen Runtime；程序不自动安装它，也不捆绑固定版 Runtime。
+- 需要已安装 WebView2 Evergreen Runtime；程序不自动安装它，也不捆绑固定版 Runtime。GPU 加速保持开启。
 - 不创建安装登记、卸载项、开机启动或开始菜单快捷方式。删除解压目录即可移除程序文件。
 
 ## 功能和使用
 
 1. 点击「使用playwright调用」，在打开的 Edge 中登录自己的 KOOK 账号，手动进入或重新加入目标语音频道。
 2. 提取成功后，程序自动填入频道 ID、用户 ID 和语音凭证，再点击「加入语音」。也支持手动填写字段或导入配置 JSON。
-3. 加入成功后窗口隐藏到系统托盘；关闭窗口也会隐藏。托盘菜单支持显示窗口、切换页面、麦克风/耳机静音、断开、调用 Playwright、打开程序或诊断目录及退出。
-4. 音频设备和连接诊断可在窗口或托盘菜单中打开。窗口尺寸和最大化状态在隐藏或退出时保存。
+3. 加入成功后窗口隐藏到系统托盘；关闭窗口也会隐藏。语音传输和 WASAPI 音频在原生辅助进程中运行，托盘时释放 WebView，显示窗口时再重建。
+4. 托盘菜单只保留显示窗口、语音连接、麦克风静音、耳机静音、断开语音和退出；音频设备、连接日志和 Playwright 提取在主窗口中打开。窗口尺寸和最大化状态在隐藏或退出时保存。
 
 也可以使用 `scripts/copy-edge-extractor.cmd`，在自己已登录的 KOOK 网页控制台中运行提取脚本并导出配置。步骤、参数和失败排查见 [Edge 提取说明](scripts/EDGE-README.md)。
 

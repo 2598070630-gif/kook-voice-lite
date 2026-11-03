@@ -1,388 +1,193 @@
 import './style.css'
-import { icon, renderShell } from './view.js'
+import { renderShell } from './view.js'
 import { parseConnectionConfig } from './connection-config.js'
-
-const $ = (selector) => document.querySelector(selector)
-const app = $('#app')
-app.innerHTML = renderShell()
-
-let sdk = null
-let sdkModule = null
-let client = null
-let localStream = null
-let localMuted = false
-let headsetPaused = false
-let meterTimer = 0
-let pendingMeter = null
-let lastTalkLogAt = 0
-let isHidden = false
-let playwrightRunning = false
-let connectionPending = false
-let activeView = 'connect'
-let logBuffer = ''
-const remoteStreams = new Map()
-
-async function nativeCommand(command) {
-  const invoke = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke
-  if (!invoke) return false
-  try { await invoke(command); return true } catch { return false }
+const $ = selector => document.querySelector(selector)
+$('#app').innerHTML = renderShell()
+let state = { connected: false, busy: false, muted: false, deafened: false, listenOnly: false, peers: [], channelId: '' }
+let activeView = 'workspace', isHidden = document.hidden, playwrightRunning = false, localBusy = false, ready = false
+let logBuffer = '', peersKey = ''
+function invoke(command, args) {
+  const fn = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke
+  return fn ? fn(command, args) : Promise.reject(new Error('请在桌面应用中使用此功能'))
 }
-
-async function nativeInvoke(command, args = undefined) {
-  const invoke = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke
-  if (!invoke) throw new Error('当前页面不是 Tauri 应用，无法调用本地 Playwright')
-  return invoke(command, args)
+const voice = (action, args = {}) => invoke('voice_command', { action, args })
+function log(message) {
+  logBuffer = `[${new Date().toLocaleTimeString()}] ${message}\n${logBuffer}`.slice(0, 6000)
+  if (!isHidden) $('#log').textContent = logBuffer
 }
-
-async function ensureSdk() {
-  if (sdk) return sdk
-  sdkModule = await import('@kookapp/voice-web-sdk')
-  sdk = new sdkModule.default()
-  log(`Voice SDK ${sdk.getVersion?.() || 'unknown'} 已按需加载`)
-  return sdk
+function saveUi() {
+  return invoke('save_ui', { ui: {
+    view: activeView, channelId: $('#channel-id').value, userId: $('#user-id').value,
+    token: $('#token-json').value, listenOnly: $('#listen-only').checked,
+    connectionExpanded: $('#connection-details')?.open !== false,
+    deviceExpanded: $('#device-details')?.open !== false,
+    logExpanded: $('#log-details')?.open !== false,
+    peersExpanded: $('#peers-details')?.open !== false,
+    inputDevice: $('#input-device').value || 'default', outputDevice: $('#output-device').value || 'default', log: logBuffer,
+  } })
 }
-
-function log(message, detail) {
-  const node = $('#log')
-  if (!node) return
-  const line = `[${new Date().toLocaleTimeString()}] ${message}${detail ? ` ${detail}` : ''}`
-  logBuffer = `${line}\n${logBuffer}`.slice(0, 6000)
-  if (activeView === 'diagnostics' && !isHidden) node.textContent = logBuffer
-}
-
 function setStatus(text, kind = 'idle') {
-  const node = $('#status')
-  node.replaceChildren(document.createElement('i'), document.createTextNode(text))
-  node.className = `status ${kind}`
-  $('#sidebar-status').textContent = text
+  $('#status').replaceChildren(document.createElement('i'), document.createTextNode(text))
+  $('#status').className = `status ${kind}`
 }
-
+function updateMeterSubscription() {
+  if (ready) voice('meter', { enabled: state.connected && !state.listenOnly && !isHidden }).catch(() => {})
+}
 function setView(name) {
-  activeView = name
-  if (name === 'diagnostics') $('#log').textContent = logBuffer || '尚无连接记录'
-  if (name !== 'devices' && meterTimer) {
-    window.clearTimeout(meterTimer)
-    meterTimer = 0
-  }
-  const titles = { connect: '语音连接', devices: '音频设备', diagnostics: '连接诊断' }
-  for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== `view-${name}`
-  for (const item of document.querySelectorAll('[data-view]')) {
-    item.classList.toggle('active', item.dataset.view === name)
-    if (item.classList.contains('nav-item')) {
-      if (item.dataset.view === name) item.setAttribute('aria-current', 'page')
-      else item.removeAttribute('aria-current')
-    }
-  }
-  $('#view-title').textContent = titles[name]
+  activeView = 'workspace'
+  $('#log').textContent = logBuffer || '尚无连接记录'
+  updateMeterSubscription()
+  if (ready) saveUi().catch(() => {})
 }
-
-function setBusy(joining) {
-  connectionPending = joining
-  const busy = joining || playwrightRunning
-  $('#join').disabled = busy || !!client
-  $('#leave').disabled = joining || !client
-  for (const id of ['channel-id', 'user-id', 'token-json', 'listen-only', 'import-config']) $(`#${id}`).disabled = busy || !!client
-  $('#playwright-extract').disabled = joining || !!client || playwrightRunning
-  syncTrayControls()
+function setBusy() {
+  const busy = localBusy || state.busy || playwrightRunning
+  $('#join').disabled = !ready || busy || state.connected
+  $('#leave').disabled = busy || !state.connected
+  for (const id of ['channel-id', 'user-id', 'token-json', 'listen-only', 'import-config']) $(`#${id}`).disabled = busy || state.connected
+  $('#playwright-extract').disabled = busy || state.connected
+  $('#mic').disabled = $('#input-device').disabled = busy || !state.connected || state.listenOnly
+  $('#headset').disabled = $('#output-device').disabled = busy || !state.connected
 }
-
-function syncTrayControls() {
-  if (!window.__TAURI__) return
-  nativeInvoke('sync_tray_controls', { connected: !!client, microphoneAvailable: !!localStream, muted: localMuted, deafened: headsetPaused, busy: connectionPending || playwrightRunning }).catch(() => {})
-}
-
 function renderPeers() {
-  const node = $('#peers')
-  $('#peer-count').textContent = String(remoteStreams.size)
-  if (!remoteStreams.size) {
-    node.className = 'peers empty'
-    node.innerHTML = '<p>暂无远端音轨</p>'
-    return
-  }
-  node.className = 'peers'
+  if (isHidden) return
+  const key = JSON.stringify(state.peers)
+  if (key === peersKey) return
+  peersKey = key; $('#peer-count').textContent = String(state.peers.length)
+  const node = $('#peers'); node.className = state.peers.length ? 'peers' : 'peers empty'
+  if (!state.peers.length) { node.innerHTML = '<p>暂无远端音轨</p>'; return }
   const fragment = document.createDocumentFragment()
-  for (const [id, item] of remoteStreams) {
-    const row = document.createElement('div')
-    row.className = 'peer'
-    const dot = document.createElement('span')
-    dot.className = 'dot'
-    const name = document.createElement('span')
-    name.className = 'peer-name'
-    name.textContent = item.label || id
-    const mute = document.createElement('button')
-    mute.className = 'peer-mute'
-    mute.type = 'button'
-    mute.textContent = '静音'
-    mute.onclick = () => { item.stream.setAudioVolume?.(0); log(`已静音远端音轨 ${id}`) }
-    row.append(dot, name, mute)
-    fragment.append(row)
+  for (const peer of state.peers) {
+    const row = document.createElement('div'); row.className = 'peer'
+    const dot = document.createElement('span'); dot.className = 'dot'
+    const name = document.createElement('span'); name.className = 'peer-name'; name.textContent = peer.label || peer.id
+    const button = document.createElement('button'); button.className = 'peer-mute'; button.type = 'button'
+    button.textContent = peer.muted ? '恢复' : '静音'
+    button.onclick = () => runVoice('peer', { peerId: peer.id, muted: !peer.muted })
+    row.append(dot, name, button); fragment.append(row)
   }
   node.replaceChildren(fragment)
 }
-
-async function refreshDevices() {
-  if (!navigator.mediaDevices?.enumerateDevices) return
-  const devices = await navigator.mediaDevices.enumerateDevices()
-  const input = $('#input-device')
-  const output = $('#output-device')
-  const selectedInput = input.value
-  const selectedOutput = output.value
-  const inputFragment = document.createDocumentFragment()
-  const outputFragment = document.createDocumentFragment()
-  let inputIndex = 0
-  let outputIndex = 0
-  for (const device of devices) {
-    if (device.kind === 'audioinput') inputFragment.append(new Option(device.label || `麦克风 ${++inputIndex}`, device.deviceId))
-    if (device.kind === 'audiooutput') outputFragment.append(new Option(device.label || `扬声器 ${++outputIndex}`, device.deviceId))
+function renderState(next = state) {
+  state = next; setBusy()
+  if (isHidden) return
+  $('#mic').setAttribute('aria-pressed', String(state.muted)); $('#mic-label').textContent = state.muted ? '开麦' : '静音'
+  $('#headset').setAttribute('aria-pressed', String(state.deafened)); $('#headset-label').textContent = state.deafened ? '恢复' : '耳机'
+  $('#connection-symbol').classList.toggle('connected', state.connected)
+  $('#room-label').textContent = state.connected ? state.channelId : '选择频道，开始通话'
+  $('#connection-title').textContent = state.connected ? (state.listenOnly ? '已连接 · 只听模式' : '已连接语音') : '尚未连接语音'
+  if (!playwrightRunning) setStatus(state.busy ? '连接中…' : state.connected ? '已加入' : '未连接', state.busy ? 'busy' : state.connected ? 'ok' : 'idle')
+  if (!state.connected) { $('#meter-fill').style.transform = 'scaleX(0)'; $('#meter-value').textContent = '—' }
+  renderPeers()
+}
+async function refreshDevices(saved = {}) {
+  const devices = await voice('devices')
+  for (const [id, kind, selected] of [['input-device', 'input', saved.inputDevice], ['output-device', 'output', saved.outputDevice]]) {
+    const node = $(`#${id}`), previous = selected || node.value || 'default'
+    node.replaceChildren(new Option('系统默认设备', 'default'), ...devices.filter(d => d[kind]).map(d => new Option(d.name, d.id)))
+    node.value = [...node.options].some(o => o.value === previous) ? previous : 'default'
   }
-  input.replaceChildren(inputFragment)
-  output.replaceChildren(outputFragment)
-  input.disabled = !localStream
-  output.disabled = !client
-  if (selectedInput) input.value = selectedInput
-  if (selectedOutput) output.value = selectedOutput
 }
-
-function installSdkHooks() {
-  sdkModule.setSdkDeps({
-    getInitVolume: () => ({ outputVolume: 100, usersVolume: {} }),
-    getInputMuted: () => localMuted,
-    getVtrxSwitch: () => false,
-    supportAiNoiseSuppression: () => false,
-    request: { get: async () => ({ data: null }) },
-    onUserTalk: (peerId) => {
-      const now = Date.now()
-      if (now - lastTalkLogAt > 2000) { lastTalkLogAt = now; log(`远端发言: ${peerId}`) }
-    },
-    onLocalVolume: (level) => {
-      if (isHidden || activeView !== 'devices') return
-      pendingMeter = Math.max(0, Math.min(100, Number(level) + 90))
-      if (meterTimer) return
-      meterTimer = window.setTimeout(() => {
-        meterTimer = 0
-        if (isHidden || activeView !== 'devices') return
-        if (pendingMeter == null) return
-        $('#meter-fill').style.transform = `scaleX(${pendingMeter / 100})`
-        $('#meter-value').textContent = `${Math.round(pendingMeter)}%`
-      }, 200)
-    },
-    onAuthing: (active) => log(active ? '正在鉴权' : '鉴权完成'),
-    onAiNoiseSuppressionError: (error) => log('AI 降噪不可用，已关闭', String(error)),
-    onDiagnosticLog: (record) => { if (record?.level === 'error') log(`SDK: ${record.event}`, record.message || '') },
-  })
-}
-
 async function hideToTray() {
-  isHidden = true
-  await nativeCommand('hide_to_tray')
+  await saveUi(); await voice('meter', { enabled: false }); await invoke('hide_to_tray'); isHidden = true
 }
-
-async function showWindow() {
-  isHidden = false
-  if (activeView === 'diagnostics') $('#log').textContent = logBuffer || '尚无连接记录'
-  await nativeCommand('show_window')
+async function showWindow() { await invoke('show_window'); isHidden = false; renderState(); updateMeterSubscription() }
+async function runVoice(action, args = {}) {
+  if (localBusy) return
+  localBusy = true; setBusy()
+  try { renderState(await voice(action, args)); if (action === 'leave') updateMeterSubscription(); await saveUi() }
+  catch (error) { log(String(error)); setView('diagnostics') }
+  finally { localBusy = false; setBusy() }
 }
-
 async function join(event) {
   event.preventDefault()
-  if (client || playwrightRunning || connectionPending) return
-  const channelId = $('#channel-id').value.trim()
-  const uid = $('#user-id').value.trim()
-  const listenOnly = $('#listen-only').checked
-  let rawToken
-  try { rawToken = JSON.parse($('#token-json').value) } catch {
-    setStatus('Token JSON 无效', 'error'); log('Token JSON 解析失败'); setView('diagnostics'); return
-  }
-  setBusy(true)
-  setStatus('加载语音…', 'busy')
+  if (localBusy || state.busy || state.connected || playwrightRunning) return
+  let token
+  try { token = JSON.parse($('#token-json').value) } catch { setStatus('Token JSON 无效', 'error'); return }
+  localBusy = true; setBusy(); setStatus('连接中…', 'busy')
   try {
-    const voiceSdk = await ensureSdk()
-    if (!voiceSdk.checkSystemRequirements()) throw new Error('需要 HTTPS/localhost、RTCPeerConnection 和 getUserMedia')
-    installSdkHooks()
-    const token = sdkModule.normalizeVoiceTokenConfig(rawToken, { ipDiscovery: [] })
-    if (!token.gateway_url) throw new Error('Token 缺少 gateway_url/wsUrl')
-    if (!listenOnly) {
-      localStream = voiceSdk.createStream({ userID: uid, audio: true, video: false, microphoneId: $('#input-device').value || 'default', autoSens: false, sensValue: -55, aiNoiseSuppression: false })
-      await new Promise((resolve, reject) => localStream.init(resolve, reject))
-    }
-    client = voiceSdk.createClient({ uid, joinId: `${Date.now()}-${uid}-${channelId}`, handlers: {
-      getLocalStream: () => localStream,
-      restartTrack: (_oldTrack, replace) => { const track = localStream?.streamObj?.getAudioTracks?.()[0]; if (track) replace(track, localStream) },
-    } })
-    client.tokenConfig = token
-    client.on('stream-added', async ({ stream, peerInfo } = {}) => {
-      if (!stream) return
-      const id = String(peerInfo?.id || peerInfo?.uid || stream.getId?.() || `peer-${remoteStreams.size + 1}`)
-      remoteStreams.set(id, { stream, label: peerInfo?.displayName || peerInfo?.name || id })
-      client.subscribe(stream)
-      stream.play?.(undefined, (error) => error && log(`远端音频播放失败 ${id}`, error.message || String(error)))
-      renderPeers()
-    })
-    client.on('peer-leave', (peer = {}) => { const id = String(peer.id || peer.uid || ''); if (id) remoteStreams.delete(id); renderPeers() })
-    client.on('peer-join', (peer = {}) => log(`成员加入 ${peer.id || peer.uid || ''}`))
-    client.on('error', (error) => { log('SDK 错误', error?.message || String(error)); setStatus('语音错误', 'error'); setView('diagnostics') })
-    setStatus('连接中…', 'busy')
-    await client.join(channelId, { gateway_url: token.gateway_url, ip_discovery: token.ipDiscovery, forceRelay: token.forceRelay, rtcConfig: token.rtcConfig, iceServers: token.iceServers, iceTransportPolicy: token.iceTransportPolicy, quickJoinListenOnly: listenOnly, joinMuted: listenOnly, joinDeafened: false })
-    if (!listenOnly) await client.publish(localStream)
-    $('#room-label').textContent = channelId
-    $('#connection-title').textContent = listenOnly ? '已连接 · 只听模式' : '已连接语音'
-    $('#connection-symbol').classList.add('connected')
-    $('#mic').disabled = listenOnly
-    $('#headset').disabled = false
-    $('#input-device').disabled = listenOnly
-    $('#output-device').disabled = false
-    setStatus(listenOnly ? '已加入 · 只听' : '已加入', 'ok')
-    log(`已加入频道 ${channelId}`)
-    await refreshDevices()
-    await hideToTray()
+    await saveUi()
+    renderState(await voice('join', {
+      channelId: $('#channel-id').value.trim(), userId: $('#user-id').value.trim(), token,
+      listenOnly: $('#listen-only').checked, inputDevice: $('#input-device').value || 'default', outputDevice: $('#output-device').value || 'default',
+    }))
+    log('已通过原生语音引擎加入频道'); await refreshDevices()
   } catch (error) {
-    log('加入失败', error?.message || String(error)); setView('diagnostics'); await leave(false); setStatus('加入失败', 'error')
-  } finally { setBusy(false) }
+    renderState((await invoke('app_snapshot')).voice)
+    log(String(error)); setView('diagnostics'); setStatus('加入失败', 'error')
+  } finally { localBusy = false; setBusy() }
+  if (state.connected) await hideToTray()
 }
-
-async function leave(restoreWindow = true) {
-  const oldClient = client
-  client = null
-  try { await oldClient?.leave?.() } catch (error) { log('离开时出现错误', error?.message || String(error)) }
-  try { oldClient?.close?.() } catch {}
-  try { localStream?.close?.() } catch {}
-  if (meterTimer) window.clearTimeout(meterTimer)
-  meterTimer = 0
-  localStream = null
-  localMuted = false
-  headsetPaused = false
-  $('#mic').setAttribute('aria-pressed', 'false')
-  $('#mic-label').textContent = '静音'
-  $('#headset').setAttribute('aria-pressed', 'false')
-  $('#headset-label').textContent = '耳机'
-  remoteStreams.clear()
-  renderPeers()
-  $('#room-label').textContent = '选择频道，开始通话'
-  $('#connection-title').textContent = '尚未连接语音'
-  $('#connection-symbol').classList.remove('connected')
-  $('#mic').disabled = true
-  $('#headset').disabled = true
-  $('#input-device').disabled = true
-  $('#output-device').disabled = true
-  $('#meter-fill').style.transform = 'scaleX(0)'
-  $('#meter-value').textContent = '—'
-  setStatus('未连接', 'idle')
-  setBusy(false)
-  if (restoreWindow) await showWindow()
-}
-
-document.querySelectorAll('[data-view]').forEach((item) => item.addEventListener('click', () => setView(item.dataset.view)))
-$('#join-form').addEventListener('submit', join)
-$('#import-config').addEventListener('click', () => $('#config-file').click())
-
 function importConnectionConfig(text, automatic = false) {
   const config = parseConnectionConfig(text)
-  $('#channel-id').value = config.channelId
-  $('#user-id').value = config.userId
-  $('#token-json').value = JSON.stringify(config.token, null, 2)
+  $('#channel-id').value = config.channelId; $('#user-id').value = config.userId; $('#token-json').value = JSON.stringify(config.token, null, 2)
   const feedback = $('#import-feedback')
   feedback.textContent = `${automatic ? '提取成功，已自动导入' : '已导入'}频道 ${config.channelId} 的语音配置，点击「加入语音」即可连接。`
-  feedback.className = 'import-feedback'
-  feedback.hidden = false
-  log(`${automatic ? '已自动导入' : '已导入'}频道 ${config.channelId} 的语音配置`)
-  return config
+  feedback.className = 'import-feedback'; feedback.hidden = false
+  log(`已导入频道 ${config.channelId} 的语音配置`); saveUi().catch(() => {})
 }
-
 async function extractWithPlaywright() {
-  if (client || playwrightRunning || connectionPending) return
-  const channel = $('#channel-id').value.trim()
-  playwrightRunning = true
-  setBusy(false)
-  setView('diagnostics')
-  setStatus('Playwright 提取中…', 'busy')
-  log(channel ? `正在启动 Playwright，目标频道 ${channel}` : '正在启动 Playwright，等待语音频道请求')
+  if (state.connected || playwrightRunning || localBusy || state.busy) return
+  playwrightRunning = true; setBusy(); setView('diagnostics'); setStatus('Playwright 提取中…', 'busy')
   log('请在打开的 Edge 中登录并重新加入目标语音频道，提取后将自动导入。')
   let unlisten
   try {
-    unlisten = await window.__TAURI__.event.listen('playwright-progress', ({ payload }) => {
-      if (payload.message) log(payload.message)
-      const titles = { opening: '正在打开 Edge…', waiting: '等待加入语音频道…', captured: '已捕获语音凭证…', verifying: '正在生成配置…', 'wrong-channel': '请加入目标频道…' }
-      if (titles[payload.stage]) setStatus(titles[payload.stage], 'busy')
-    })
-    const config = await nativeInvoke('run_playwright_extractor', { channel: channel || null })
+    unlisten = await window.__TAURI__.event.listen('playwright-progress', ({ payload }) => { if (payload.message) log(payload.message) })
+    const config = await invoke('run_playwright_extractor', { channel: $('#channel-id').value.trim() || null })
     importConnectionConfig(JSON.stringify(config), true)
-    setStatus('提取成功 · 已自动导入', 'ok')
-    setView('connect')
-    await showWindow()
-  } catch (error) {
-    setStatus('Playwright 提取未完成', 'error')
-    log('Playwright 提取未完成', error?.message || String(error))
-  } finally {
-    playwrightRunning = false
-    unlisten?.()
-    setBusy(false)
-  }
+    setStatus('提取成功 · 已自动导入', 'ok'); setView('connect'); await showWindow()
+  } catch (error) { setStatus('Playwright 提取未完成', 'error'); log(String(error)) }
+  finally { playwrightRunning = false; unlisten?.(); setBusy(); await saveUi() }
 }
-$('#playwright-extract').addEventListener('click', extractWithPlaywright)
-$('#config-file').addEventListener('change', async (event) => {
-  const file = event.target.files?.[0]
-  if (!file || client) return
-  const feedback = $('#import-feedback')
-  try {
-    if (file.size > 256 * 1024) throw new Error('配置文件过大，请选择提取脚本生成的小型 JSON 文件')
-    importConnectionConfig(await file.text())
-  } catch (error) {
-    feedback.textContent = error.message || '配置导入失败'
-    feedback.className = 'import-feedback error'
-  } finally {
-    feedback.hidden = false
-    event.target.value = ''
-  }
-})
-$('#leave').addEventListener('click', () => leave(true))
-$('#tray').addEventListener('click', hideToTray)
-$('#clear-log').addEventListener('click', () => { logBuffer = ''; $('#log').textContent = '尚无连接记录' })
-function toggleMicrophone() {
-  if (!client || !localStream || connectionPending) return
-  const muted = !localMuted
-  if (muted) client.pauseMic(localStream); else client.resumeMic(localStream)
-  localMuted = muted
-  $('#mic').setAttribute('aria-pressed', String(localMuted)); $('#mic-label').textContent = localMuted ? '开麦' : '静音'
-  syncTrayControls()
-}
-function toggleHeadset() {
-  if (!client || connectionPending) return
-  const paused = !headsetPaused
-  if (paused) client.pauseHeadset(); else client.resumeHeadset()
-  headsetPaused = paused
-  $('#headset').setAttribute('aria-pressed', String(headsetPaused)); $('#headset-label').textContent = headsetPaused ? '恢复' : '耳机'
-  syncTrayControls()
-}
-$('#mic').addEventListener('click', toggleMicrophone)
-$('#headset').addEventListener('click', toggleHeadset)
-
 async function handleTrayAction(action) {
-  try {
-    if (['connect', 'devices', 'diagnostics'].includes(action)) {
-      setView(action)
-      await showWindow()
-    } else if (action === 'microphone') toggleMicrophone()
-    else if (action === 'headset') toggleHeadset()
-    else if (action === 'disconnect' && client && !connectionPending) await leave(false)
-    else if (action === 'extract') { await showWindow(); await extractWithPlaywright() }
-  } catch (error) {
-    log('托盘操作失败', error?.message || String(error))
-    setView('diagnostics')
-    await showWindow()
-  } finally { syncTrayControls() }
+  if (['connect', 'devices', 'diagnostics'].includes(action)) { setView(action); await showWindow() }
+  else if (action === 'extract') { await invoke('app_snapshot'); await extractWithPlaywright() }
 }
-if (window.__TAURI__?.event?.listen) {
-  window.__TAURI__.event.listen('tray-action', ({ payload }) => handleTrayAction(payload)).then(syncTrayControls).catch(error => log('托盘控制不可用', String(error)))
-  window.__TAURI__.event.listen('tray-error', async ({ payload }) => { log(payload); setView('diagnostics'); await showWindow() }).catch(() => {})
+$('#join-form').addEventListener('submit', join)
+for (const id of ['connection-details', 'device-details', 'log-details', 'peers-details']) {
+  $(`#${id}`).addEventListener('toggle', () => { if (ready) saveUi().catch(() => {}) })
 }
-$('#input-device').addEventListener('change', async (event) => { try { await localStream?.switchDevice(client, event.target.value); log('已切换麦克风') } catch (error) { log('切换麦克风失败', error?.message || String(error)) } })
-$('#output-device').addEventListener('change', (event) => { for (const { stream } of remoteStreams.values()) stream.setAudioOutput?.(event.target.value); log('已切换扬声器') })
-document.addEventListener('visibilitychange', () => { isHidden = document.visibilityState === 'hidden' })
-window.addEventListener('focus', () => {
-  isHidden = false
-  if (activeView === 'diagnostics') $('#log').textContent = logBuffer || '尚无连接记录'
+$('#import-config').onclick = () => $('#config-file').click()
+$('#playwright-extract').onclick = extractWithPlaywright
+$('#config-file').onchange = async event => {
+  const file = event.target.files?.[0]
+  if (!file || state.connected) return
+  try { if (file.size > 256 * 1024) throw new Error('配置文件过大'); importConnectionConfig(await file.text()) }
+  catch (error) { $('#import-feedback').textContent = error.message; $('#import-feedback').className = 'import-feedback error'; $('#import-feedback').hidden = false }
+  finally { event.target.value = '' }
+}
+$('#leave').onclick = () => runVoice('leave')
+$('#tray').onclick = () => hideToTray().catch(error => log(String(error)))
+$('#mic').onclick = () => runVoice('microphone'); $('#headset').onclick = () => runVoice('headset')
+$('#clear-log').onclick = event => { event.preventDefault(); logBuffer = ''; $('#log').textContent = '尚无连接记录'; saveUi().catch(() => {}) }
+$('#input-device').onchange = event => runVoice('input', { deviceId: event.target.value })
+$('#output-device').onchange = event => runVoice('output', { deviceId: event.target.value })
+for (const id of ['channel-id', 'user-id', 'token-json', 'listen-only']) $(`#${id}`).addEventListener('input', () => saveUi().catch(() => {}))
+document.addEventListener('visibilitychange', () => {
+  isHidden = document.hidden; updateMeterSubscription()
+  if (!isHidden) { renderState(); $('#log').textContent = logBuffer }
 })
-window.addEventListener('blur', () => { if (document.visibilityState === 'hidden') isHidden = true })
-
-setView('connect')
-if (!window.isSecureContext) log('提示：请通过 localhost/HTTPS 打开，file:// 会被浏览器拒绝麦克风。')
+async function bootstrap() {
+  if (!window.__TAURI__) { setStatus('请启动桌面应用', 'idle'); return }
+  await window.__TAURI__.event.listen('voice-event', ({ payload: { event, payload } }) => {
+    if (event === 'state') { renderState(payload); updateMeterSubscription() }
+    else if (event === 'log') log(payload.message)
+    else if (event === 'meter' && !isHidden) {
+      $('#meter-fill').style.transform = `scaleX(${payload.level / 100})`; $('#meter-value').textContent = `${Math.round(payload.level)}%`
+    }
+  })
+  await window.__TAURI__.event.listen('tray-action', ({ payload }) => handleTrayAction(payload).catch(error => log(String(error))))
+  await window.__TAURI__.event.listen('tray-error', async ({ payload }) => { log(payload); setView('diagnostics'); await showWindow() })
+  const snapshot = await invoke('app_snapshot'), ui = snapshot.ui
+  $('#channel-id').value = ui.channelId || ''; $('#user-id').value = ui.userId || ''; $('#token-json').value = ui.token || ''; $('#listen-only').checked = !!ui.listenOnly
+  $('#connection-details').open = ui.connectionExpanded !== false
+  $('#device-details').open = ui.deviceExpanded !== false
+  $('#log-details').open = ui.logExpanded !== false
+  $('#peers-details').open = ui.peersExpanded !== false
+  logBuffer = ui.log || snapshot.logs.map(message => `${message}\n`).reverse().join('')
+  ready = true; renderState(snapshot.voice)
+  if (state.connected) await refreshDevices(ui)
+  setView(ui.view || 'connect')
+  if (ui.action === 'extract') await extractWithPlaywright()
+}
+setBusy()
+bootstrap().catch(error => { log(String(error)); setStatus('初始化失败', 'error') })

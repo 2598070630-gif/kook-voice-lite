@@ -17,8 +17,8 @@
         "title": "KOOK Voice Lite",
         "width": 900,
         "height": 620,
-        "minWidth": 700,
-        "minHeight": 520,
+        "minWidth": 560,
+        "minHeight": 420,
         "resizable": true,
         "fullscreen": false,
         "visible": true
@@ -35,7 +35,9 @@
       "resources/node.exe",
       "resources/playwright-extract-voice.mjs",
       "resources/run-playwright-extractor.cmd",
-      "resources/node_modules/playwright-core/**/*"
+      "resources/native/**/*",
+      "resources/node_modules/**/*",
+      "resources/licenses/**/*"
     ],
     "icon": ["icons/icon.ico"]
   }

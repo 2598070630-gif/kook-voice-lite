@@ -8,6 +8,7 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/resources/node.exe
 src-tauri/resources/licenses/
+src-tauri/resources/native/
 
 # Release artifacts and local verification
 portable/
